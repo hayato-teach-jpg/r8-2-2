@@ -1,0 +1,17 @@
+import {Miniflare} from 'miniflare';import assert from 'node:assert/strict';import {readFile} from 'node:fs/promises';
+const mf=new Miniflare({modules:true,script:((await readFile('lib/room.mjs','utf8')).replace("import {sanitizeAvatar} from './avatar.mjs';",'')+'\n'+await readFile('lib/avatar.mjs','utf8'))+'\nexport default {fetch(r,e){return handleRoom(r,e.DB)}}',d1Databases:['DB'],compatibilityDate:'2026-01-01'});
+try{const db=await mf.getD1Database('DB');await db.exec('CREATE TABLE rooms(code TEXT PRIMARY KEY,state TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 0,expires INTEGER NOT NULL)');await db.exec('CREATE TABLE request_limits(key TEXT PRIMARY KEY,count INTEGER NOT NULL,expires INTEGER NOT NULL)');
+async function call(body,ip='198.51.100.1',device='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'){const r=await mf.dispatchFetch('https://kuku.test/api/room',{method:'POST',headers:{'Content-Type':'application/json','CF-Connecting-IP':ip,cookie:'kuku_device='+device},body:JSON.stringify(body)});return {status:r.status,headers:r.headers,body:await r.json()};}
+const created=await call({action:'create',rows:[2],total:5,mode:'speed'});assert.equal(created.status,200);const host=created.body;
+for(const value of [null,'',false,[],{},0,'a'.repeat(72)])for(const action of ['poll','leave','start','answer','next','skip']){const r=await call({action,code:host.code,token:value},'198.51.100.2');assert([403,429].includes(r.status));}
+let row=await db.prepare('SELECT state FROM rooms WHERE code=?').bind(host.code).first();assert.equal(JSON.parse(row.state).status,'lobby');assert.equal(JSON.parse(row.state).tokens[1],null);
+const joined=await call({action:'join',code:host.code,token:null});assert.equal(joined.status,200);assert.equal(typeof joined.body.token,'string');assert.equal(joined.body.token.length,72);
+const full=await call({action:'join',code:host.code},'198.51.100.3');assert.equal(full.status,409);
+const reconnect=await call({action:'poll',code:host.code,token:joined.body.token});assert.equal(reconnect.status,200);
+for(let i=0;i<15;i++){const r=await call({action:'join',code:'000000'},'198.51.100.4');assert.equal(r.status,404);}const blocked=await call({action:'join',code:'000000'},'198.51.100.4');assert.equal(blocked.status,429);assert.equal(blocked.headers.get('Retry-After'),'60');assert.equal((await call({action:'join',code:'000000'},'198.51.100.4')).status,429);
+// A whole class shares one school network, but each tablet has a separate device cookie.
+for(let i=0;i<40;i++){const device=String(i).padStart(8,'0')+'-aaaa-aaaa-aaaa-aaaaaaaaaaaa';const h=await call({action:'create',rows:[2,3],total:5,mode:'calm'},'198.51.100.10',device);assert.equal(h.status,200);const g=await call({action:'join',code:h.body.code},'198.51.100.10',String(i+100).padStart(8,'0')+'-aaaa-aaaa-aaaa-aaaaaaaaaaaa');assert.equal(g.status,200);}
+// Network-level cap still applies when an attacker rotates device cookies.
+let final;for(let i=0;i<301;i++)final=await call({action:'join',code:'000000'},'198.51.100.20',String(i).padStart(8,'0')+'-bbbb-bbbb-bbbb-bbbbbbbbbbbb');assert.equal(final.status,429);
+const malformed=await call(null);assert.equal(malformed.status,400);console.log('PASS: null/empty/non-string token bypass blocked; full room lock; valid reconnect; device and network throttles; 40 pairs on a shared school IP; malformed JSON values.');
+}finally{await mf.dispose()}
